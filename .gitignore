@@ -1,0 +1,6 @@
+.*
+!.gitignore
+!.nvmrc
+node_modules/
+database.db*
+*.jsonl
