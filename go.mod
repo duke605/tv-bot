@@ -5,10 +5,13 @@ go 1.22.1
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/bwmarrin/discordgo v0.27.1
+	github.com/bwmarrin/snowflake v0.3.0
+	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/jmoiron/sqlx v1.3.5
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/pressly/goose/v3 v3.19.1
 	github.com/robfig/cron v1.2.0
+	github.com/sarulabs/di v2.0.0+incompatible
 	github.com/spf13/afero v1.11.0
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2

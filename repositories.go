@@ -4,109 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"log/slog"
+	"time"
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/duke605/tv-bot/utils"
 	"github.com/jmoiron/sqlx"
 )
-
-type SeriesRepo struct {
-	db *sqlx.DB
-}
-
-func NewSeriesRepo(db *sqlx.DB) *SeriesRepo {
-	return &SeriesRepo{
-		db: db,
-	}
-}
-
-func (repo *SeriesRepo) Upsert(ctx context.Context, s *Series, fieldsToUpdate ...string) error {
-	builder := sq.Insert("series").SetMap(s.ToMap())
-	if len(fieldsToUpdate) > 0 {
-		suffix := "ON CONFLICT(`id`) DO UPDATE SET"
-		for _, field := range fieldsToUpdate {
-			suffix += fmt.Sprintf("\n`%[1]s` = excluded.`%[1]s`", field)
-		}
-		builder = builder.Suffix(suffix)
-	} else {
-		builder = builder.Suffix("ON CONFLICT(`id`) DO NOTHING")
-	}
-
-	query, args, err := builder.ToSql()
-	if err != nil {
-		return err
-	}
-
-	slog.DebugContext(ctx, "Upserting series", "query", query)
-	if _, err = repo.db.ExecContext(ctx, query, args...); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (repo *SeriesRepo) Delete(ctx context.Context, id uint64) error {
-	query, args, err := sq.Delete("series").
-		Where("id", id).
-		ToSql()
-	if err != nil {
-		return err
-	}
-
-	slog.DebugContext(ctx, "Deleting series", "query", query)
-	if _, err := repo.db.ExecContext(ctx, query, args...); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (repo *SeriesRepo) Find(ctx context.Context, id uint64, s *Series) error {
-	query, args, err := sq.Select("*").
-		From("series").
-		Where("id", id).
-		ToSql()
-	if err != nil {
-		return err
-	}
-
-	slog.DebugContext(ctx, "Finding series", "query", query)
-	return repo.db.GetContext(ctx, s, query, args...)
-}
-
-func (repo *SeriesRepo) List(ctx context.Context, filter ...interface{}) utils.Pager[Series] {
-	builder := sq.Select("*").From("series").Limit(10)
-
-	if len(filter) > 0 {
-		builder = builder.Where(filter[0])
-	}
-
-	return utils.NewPager(func(_ int, buf []Series) ([]Series, error) {
-		if len(buf) > 0 {
-			builder = builder.Where(sq.Gt{
-				"id": buf[len(buf)-1].ID,
-			})
-		}
-
-		query, args, err := builder.ToSql()
-		if err != nil {
-			return nil, err
-		}
-
-		slog.DebugContext(ctx, "Listing series", "query", query)
-		buf = buf[:0]
-		err = repo.db.SelectContext(ctx, &buf, query, args...)
-		if err != nil {
-			return nil, err
-		} else if len(buf) == 0 {
-			return nil, sql.ErrNoRows
-		}
-
-		return buf, err
-	})
-}
 
 type NotificationsRepo struct {
 	db *sqlx.DB
@@ -134,7 +38,10 @@ func (repo *NotificationsRepo) InsertMany(ctx context.Context, notis []*Notifica
 		return err
 	}
 
-	slog.DebugContext(ctx, "Inserting many notifications", "query", query)
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Inserting many notifications", "query", query, "duration", time.Since(start).String(), "error", err)
+	}()
 	_, err = repo.db.ExecContext(ctx, query, args...)
 	return err
 }
@@ -153,7 +60,10 @@ func (repo *NotificationsRepo) ExistsForEpisodeSeasonAndSeries(ctx context.Conte
 		return false, err
 	}
 
-	slog.DebugContext(ctx, "Checking for existence of notification", "query", query)
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Checking for existence of notification", "query", query, "duration", time.Since(start).String(), "error", err)
+	}()
 	err = repo.db.GetContext(ctx, &seriesID, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -174,6 +84,31 @@ func NewSubscriptionsRepo(db *sqlx.DB) *SubscriptionsRepo {
 	}
 }
 
+func (repo *SubscriptionsRepo) GetDistinctSeriesIDs(ctx context.Context) utils.Pager[uint64] {
+	builder := sq.Select("DISTINCT series_id").From("subscriptions").Limit(10)
+
+	return utils.NewPager(func(page int, buf []uint64) ([]uint64, error) {
+		query, args, err := builder.Offset(uint64(page) * 10).ToSql()
+		if err != nil {
+			return nil, err
+		}
+
+		start := time.Now()
+		defer func() {
+			slog.DebugContext(ctx, "Getting distinct series IDs", "query", query, "duration", time.Since(start).String(), "error", err)
+		}()
+		buf = buf[:0]
+		err = repo.db.SelectContext(ctx, &buf, query, args...)
+		if err != nil {
+			return nil, err
+		} else if len(buf) == 0 {
+			return nil, sql.ErrNoRows
+		}
+
+		return buf, err
+	})
+}
+
 // GetAllSubscribedToSeries returns a slice of user IDs that are subscribed to the series ID provided
 func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, seriesID uint64) ([]uint64, error) {
 	query, args, err := sq.Select("user_id").
@@ -183,11 +118,97 @@ func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, ser
 		return nil, err
 	}
 
-	slog.DebugContext(ctx, "Getting subscribers for series", "query", query)
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Getting subscribers for series", "query", query, "duration", time.Since(start).String(), "error", err)
+	}()
 	userIDs := []uint64{}
 	if err = repo.db.SelectContext(ctx, &userIDs, query, args...); err != nil {
 		return nil, err
 	}
 
 	return userIDs, nil
+}
+
+func (repo *SubscriptionsRepo) Insert(ctx context.Context, sub *Subscription) error {
+	query, args, err := sq.Insert("subscriptions").
+		SetMap(sub.ToMap()).
+		ToSql()
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Inserting subscription", "query", query, "duration", time.Since(start).String(), "error", err)
+	}()
+	_, err = repo.db.ExecContext(ctx, query, args)
+	return err
+}
+
+func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, userID uint64) (bool, error) {
+	query, args, err := sq.Select("true").
+		From("subscriptions").
+		Limit(1).
+		Where("user_id", userID).
+		ToSql()
+	if err != nil {
+		return false, err
+	}
+
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Checking if user is subscribed", "query", query, "user_id", userID, "duration", time.Since(start).String(), "error", err)
+	}()
+	f := false
+	err = repo.db.GetContext(ctx, &f, query, args...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+
+	return f, nil
+}
+
+func (repo *SubscriptionsRepo) GetEarliestSubscriptionForSeries(ctx context.Context, seriesID uint64) (time.Time, error) {
+	query, args, err := sq.Select("MIN(created_at)").
+		From("subscriptions").
+		Where("series_id", seriesID).
+		ToSql()
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Getting earliest subscription for series", "query", query, "series_id", seriesID, "duration", time.Since(start).String(), "error", err)
+	}()
+	t := time.Time{}
+	err = repo.db.GetContext(ctx, &t, query, args...)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return t, nil
+}
+
+func (repo *SubscriptionsRepo) DeleteSubscriptionsForSeries(ctx context.Context, seriesID uint64) error {
+	query, args, err := sq.Delete("subscriptions").
+		Where("series_id", seriesID).
+		ToSql()
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Deleting subscriptions for series", "query", query, "series_id", seriesID, "duration", time.Since(start).String(), "error", err)
+	}()
+	_, err = repo.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

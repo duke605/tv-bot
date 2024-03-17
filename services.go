@@ -13,25 +13,61 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/duke605/tv-bot/moviedb"
 	"github.com/duke605/tv-bot/utils"
+	"github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/spf13/viper"
 )
 
 type SeriesService struct {
-	seriesRepo    *SeriesRepo
 	notiRepo      *NotificationsRepo
-	subsRepo      *SubscriptionsRepo
+	subsSrv       *SubscriptionsService
 	discord       *discordgo.Session
 	movieDBClient moviedb.Client
+
+	seriesCacheByID *expirable.LRU[uint64, *moviedb.SeriesDetails]
+	searchCache     *expirable.LRU[string, []utils.Tuple[string, uint64]]
 }
 
-func NewSeriesService(sr *SeriesRepo, nr *NotificationsRepo, subr *SubscriptionsRepo, d *discordgo.Session, mdbc moviedb.Client) *SeriesService {
+func NewSeriesService(nr *NotificationsRepo, ss *SubscriptionsService, d *discordgo.Session, mdbc moviedb.Client) *SeriesService {
 	return &SeriesService{
-		seriesRepo:    sr,
-		notiRepo:      nr,
-		subsRepo:      subr,
-		discord:       d,
-		movieDBClient: mdbc,
+		notiRepo:        nr,
+		subsSrv:         ss,
+		discord:         d,
+		movieDBClient:   mdbc,
+		seriesCacheByID: expirable.NewLRU[uint64, *moviedb.SeriesDetails](100, nil, time.Minute*10),
+		searchCache:     expirable.NewLRU[string, []utils.Tuple[string, uint64]](100, nil, time.Minute*10),
 	}
+}
+
+// SearchSeries searches for series that partially or fully match the provided name and returns an array of tuples containing
+// the name of the series and its id
+func (srv *SeriesService) SearchSeries(ctx context.Context, name string) ([]utils.Tuple[string, uint64], error) {
+	// Checking if IDs are in cache
+	if ids, ok := srv.searchCache.Get(name); ok {
+		return ids, nil
+	}
+
+	results := new(moviedb.SearchResults[*moviedb.SearchSeriesDetails])
+	_, err := srv.movieDBClient.SearchTVSeriesDetails(name, results,
+		moviedb.RequestOptionWithContext(ctx),
+		moviedb.RequestOptionWithQueryParams("language", "en-US"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if results.TotalResults == 0 {
+		return []utils.Tuple[string, uint64]{}, nil
+	}
+
+	ret := make([]utils.Tuple[string, uint64], 0, results.TotalResults)
+	for _, s := range results.Results {
+		ret = append(ret, utils.Tuple[string, uint64]{T: s.Name, V: s.ID})
+	}
+
+	// Adding IDs to cache
+	srv.searchCache.Add(name, ret)
+
+	return ret, nil
 }
 
 // FindNewEpisodes finds new episodes for all the series subscribed to in the database
@@ -40,7 +76,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	seriesPager := srv.seriesRepo.List(ctx)
+	seriesPager := srv.subsSrv.GetDistinctSeriesIDs(ctx)
 	now := time.Now()
 	var subscribersIDs []uint64
 	outstanding := utils.NewDualBatcher(10, func(embeds []*discordgo.MessageEmbed, notifications []*Notification) error {
@@ -48,35 +84,41 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	})
 
 	for {
-		seriesModel, err := seriesPager.Next()
+		seriesID, err := seriesPager.Next()
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		} else if err != nil {
 			return err
 		}
-		logger := slog.With("series_id", seriesModel.ID, "series_name", seriesModel.Name)
+		logger := slog.With("series_id", seriesID)
 
 		// Getting subscribers to the series and skipping if none
-		subscribersIDs, err = srv.subsRepo.GetAllSubscribedToSeries(ctx, seriesModel.ID)
+		subscribersIDs, err = srv.subsSrv.GetAllSubscribedToSeries(ctx, seriesID)
 		if err != nil {
 			return err
 		}
 		if len(subscribersIDs) == 0 {
-			logger.InfoContext(ctx, "No subscribers for series", "series_id", seriesModel.ID, "series_name", seriesModel.Name)
+			logger.WarnContext(ctx, "No subscribers for series")
 			continue
 		}
 
-		series := moviedb.SeriesDetails{}
-		_, err = srv.movieDBClient.GetTVSeriesDetails(seriesModel.ID, &series,
+		epoch, err := srv.subsSrv.GetEarliestSubscriptionForSeries(ctx, seriesID)
+		if err != nil {
+			return err
+		}
+
+		series := &moviedb.SeriesDetails{}
+		_, err = srv.movieDBClient.GetTVSeriesDetails(seriesID, series,
 			moviedb.RequestOptionWithQueryParams("language", "en-US"),
 			moviedb.RequestOptionWithContext(ctx),
 		)
 		if err != nil {
 			return err
 		}
+		srv.seriesCacheByID.Add(series.ID, series)
 
 		season := moviedb.SeasonDetails{}
-		_, err = srv.movieDBClient.GetTVSeasonDetails(seriesModel.ID, series.NumberOfSeasons, &season,
+		_, err = srv.movieDBClient.GetTVSeasonDetails(series.ID, series.NumberOfSeasons, &season,
 			moviedb.RequestOptionWithQueryParams("language", "en-US"),
 			moviedb.RequestOptionWithContext(ctx),
 		)
@@ -92,7 +134,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 				continue
 			}
 			releaseDate, err := time.ParseInLocation(time.DateOnly, episode.AirDate, now.Location())
-			if err != nil || releaseDate.After(now) || releaseDate.Before(seriesModel.CreatedAt) {
+			if err != nil || releaseDate.After(now) || releaseDate.Before(epoch) {
 				continue
 			}
 
@@ -104,7 +146,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 				continue
 			}
 
-			embed := srv.makeEmbedForEpisode(&series, &season, &episode, subscribersIDs)
+			embed := srv.makeEmbedForEpisode(series, &season, &episode, subscribersIDs)
 			noti := &Notification{
 				Episode:  episode.EpisodeNumber,
 				Season:   episode.SeasonNumber,
@@ -123,6 +165,27 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// GetSeriesDetails gets details about a series. Function will attempt to look for the details in the cache
+// before going out to the internet.
+func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64) (*moviedb.SeriesDetails, error) {
+	series, ok := srv.seriesCacheByID.Get(seriesID)
+	if ok {
+		return series, nil
+	}
+
+	series = new(moviedb.SeriesDetails)
+	_, err := srv.movieDBClient.GetTVSeriesDetails(seriesID, series,
+		moviedb.RequestOptionWithContext(ctx),
+		moviedb.RequestOptionWithQueryParams("language", "en-US"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	srv.seriesCacheByID.Add(seriesID, series)
+
+	return series, nil
 }
 
 func (SeriesService) makeEmbedForEpisode(
@@ -151,7 +214,7 @@ func (SeriesService) makeEmbedForEpisode(
 			{
 				Name:   "Wathers",
 				Inline: true,
-				Value: strings.Join(utils.Map(subscriberIDs, func(sID uint64, _ int) string {
+				Value: strings.Join(utils.MapSlice(subscriberIDs, func(sID uint64, _ int) string {
 					return fmt.Sprintf("<@%d>", sID)
 				}), " "),
 			},
@@ -202,7 +265,7 @@ func (srv *SeriesService) sendEmbedsAndMakeNotifications(
 	channelID := viper.GetString("discord.notifications_channel_id")
 	data := &discordgo.MessageSend{
 		Embeds: embeds,
-		Content: strings.Join(utils.Map(subscriberIDs, func(sID uint64, _ int) string {
+		Content: strings.Join(utils.MapSlice(subscriberIDs, func(sID uint64, _ int) string {
 			return fmt.Sprintf("<@%d>", sID)
 		}), " "),
 	}
@@ -224,39 +287,225 @@ func (srv *SeriesService) sendEmbedsAndMakeNotifications(
 	return srv.notiRepo.InsertMany(ctx, notifications)
 }
 
-// AddToWatchlistByID adds a series by ID to watch for new episodes
-func (srv *SeriesService) AddToWatchlistByID(ctx context.Context, seriesID uint64) (*Series, error) {
-	details := moviedb.SeriesDetails{}
-	_, err := srv.movieDBClient.GetTVSeriesDetails(seriesID, &details,
-		moviedb.RequestOptionWithQueryParams("language", "en-US"),
-		moviedb.RequestOptionWithContext(ctx),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	seriesModel := Series{
-		ID:         seriesID,
-		Name:       details.Name,
-		PosterPath: NewNull(details.PosterPath, details.PosterPath != ""),
-		CreatedAt:  time.Now(),
-	}
-
-	err = srv.seriesRepo.Upsert(ctx, &seriesModel, "poster_path")
-	if err != nil {
-		return nil, err
-	}
-
-	return &seriesModel, nil
+type commandHandler = func(context.Context, *discordgo.Session, *discordgo.InteractionCreate)
+type autocompleteHandler = func(context.Context, *discordgo.Session, *discordgo.InteractionCreate, *discordgo.ApplicationCommandInteractionDataOption)
+type discordCommand struct {
+	discordgo.ApplicationCommand
+	Handle       commandHandler
+	Autocomplete map[string]autocompleteHandler
 }
 
-func (srv *SeriesService) IsOnWatchlist(ctx context.Context, seriesID uint64) (bool, error) {
-	err := srv.seriesRepo.Find(ctx, seriesID, &Series{})
-	if errors.Is(sql.ErrNoRows, err) {
-		return false, nil
-	} else if err != nil {
-		return false, err
+func (dc *discordCommand) addToHandlersMap(m map[string]*discordCommand) {
+	m[dc.Name] = dc
+}
+
+type DiscordCommandService struct {
+	sess      *discordgo.Session
+	commands  map[string]*discordCommand
+	seriesSrv *SeriesService
+	subsSrv   *SubscriptionsService
+}
+
+func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *SubscriptionsService) *DiscordCommandService {
+	srv := &DiscordCommandService{
+		seriesSrv: ss,
+		sess:      s,
+		subsSrv:   sus,
+		commands:  map[string]*discordCommand{},
 	}
 
-	return true, nil
+	(&discordCommand{
+		ApplicationCommand: discordgo.ApplicationCommand{
+			Name:         "subscribe",
+			Description:  "Subscribes you to a series so you will be notified when a new episode of releases",
+			DMPermission: PP(false),
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "series",
+					Autocomplete: true,
+					Required:     true,
+					Description:  "The series to unsubscribe from",
+				},
+			},
+		},
+		Handle: func(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Flags: discordgo.MessageFlagsEphemeral,
+				},
+			})
+
+			resp := utils.NewDiscordResponse(s, i)
+			seriesOpt := i.ApplicationCommandData().Options[0]
+			userID, _ := strconv.ParseUint(i.Member.User.ID, 10, 64)
+			seriesID, err := strconv.ParseUint(seriesOpt.StringValue(), 10, 64)
+			if err != nil {
+				resp.SetWarning("").SetTitle("Series must be selected from the list").Edit()
+				return
+			}
+
+			series, err := srv.seriesSrv.GetSeriesDetails(ctx, seriesID)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed to get series information", "error", err)
+				resp.SetError(err).SetTitle("Failed to look up information about series").Edit()
+				return
+			}
+
+			// Checking if series has ended
+			status := strings.ToLower(series.Status)
+			if status == "canceled" || status == "ended" {
+				srv.subsSrv.DeleteSubscriptionsForSeries(ctx, seriesID)
+				slog.ErrorContext(ctx, "User tried to subscribe to a canceled/finished series", "series", series.Name, "user", i.Member.User.Username)
+				resp.SetWarning("You cannot subscribe to a series that has ended or been canceled").SetTitlef("Series %s", status).Edit()
+				return
+			}
+
+			isSubbed, err := srv.subsSrv.UserIsSubscribed(ctx, userID)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed checking if user is subscribed", "user_id", userID, "series_id", seriesID)
+				resp.SetError(err).SetTitle("Failed checking subscription status").Edit()
+				return
+			} else if isSubbed {
+				resp.SetWarning("").SetTitle("You are already subscribed").Edit()
+				return
+			}
+
+			if err = srv.subsSrv.SubscribeUserToSeries(ctx, seriesID, userID); err != nil {
+				slog.ErrorContext(ctx, "Failed to subscribe user to series", "user_id", userID, "series_id", seriesID, "error", err)
+				resp.SetError(err).SetTitle("Failed to subscribe you to series").Edit()
+				return
+			}
+
+			resp.SetSuccess("You will now receive updates when new episodes release").SetTitlef("Successfully subscribed to '%s'", series.Name).Edit()
+		},
+		Autocomplete: map[string]autocompleteHandler{
+			"series": srv.autocompleteForSeriesName,
+		},
+	}).addToHandlersMap(srv.commands)
+
+	(&discordCommand{
+		ApplicationCommand: discordgo.ApplicationCommand{
+			Name:         "unsubscribe",
+			Description:  "Unsubscribes you from a series",
+			DMPermission: PP(false),
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:         discordgo.ApplicationCommandOptionString,
+					Name:         "series",
+					Autocomplete: true,
+					Required:     true,
+					Description:  "The series to unsubscribe from",
+				},
+			},
+		},
+		Handle: func(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+
+		},
+		Autocomplete: map[string]autocompleteHandler{
+			"series": srv.autocompleteForSeriesName,
+		},
+	}).addToHandlersMap(srv.commands)
+
+	return srv
+}
+
+func (srv *DiscordCommandService) RegisterHandlers(ctx context.Context) {
+	srv.sess.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		commandName := i.ApplicationCommandData().Name
+		command := srv.commands[commandName]
+		if command == nil {
+			slog.WarnContext(ctx, "Unknown command", "command", commandName)
+			utils.NewDiscordResponse(s, i).SetWarning("").SetTitle("Unknown command").Respond()
+			return
+		}
+
+		slog.InfoContext(ctx, "Received command", "command", commandName, "type", i.ApplicationCommandData().Type().String())
+		if i.Type == discordgo.InteractionApplicationCommand {
+			command.Handle(ctx, s, i)
+		} else if i.Type == discordgo.InteractionApplicationCommandAutocomplete {
+			ctx, cancel := context.WithTimeout(ctx, time.Second*3)
+			defer cancel()
+
+			for _, opt := range i.ApplicationCommandData().Options {
+				if opt.Focused {
+					command.Autocomplete[opt.Name](ctx, s, i, opt)
+					break
+				}
+			}
+		}
+	})
+}
+
+func (srv *DiscordCommandService) RegisterCommands(ctx context.Context) error {
+	appID := viper.GetString("discord.client_id")
+	serverID := viper.GetString("discord.server_id")
+	commands := utils.Map(srv.commands, func(cmd *discordCommand, _ string) *discordgo.ApplicationCommand {
+		return &cmd.ApplicationCommand
+	})
+
+	_, err := srv.sess.ApplicationCommandBulkOverwrite(appID, serverID, commands, discordgo.WithContext(ctx))
+	return err
+}
+
+func (srv *DiscordCommandService) autocompleteForSeriesName(
+	ctx context.Context,
+	s *discordgo.Session,
+	i *discordgo.InteractionCreate,
+	o *discordgo.ApplicationCommandInteractionDataOption,
+) {
+	partialName := o.StringValue()
+	slog.DebugContext(ctx, "Autocomplete for series", "value", partialName)
+	if partialName == "" {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+			Data: &discordgo.InteractionResponseData{
+				Choices: []*discordgo.ApplicationCommandOptionChoice{},
+			},
+		})
+		return
+	}
+
+	// Looking up partial name
+	series, err := srv.seriesSrv.SearchSeries(ctx, partialName)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to search series", "partial_name", partialName, "error", err)
+		utils.NewDiscordResponse(s, i).SetError(err).SetTitle("Could not search for series").Respond()
+		return
+	}
+	series = utils.Clamp(series, 20)
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+		Data: &discordgo.InteractionResponseData{
+			Choices: utils.MapSlice(series, func(series utils.Tuple[string, uint64], _ int) *discordgo.ApplicationCommandOptionChoice {
+				return &discordgo.ApplicationCommandOptionChoice{
+					Name:  series.T,
+					Value: fmt.Sprint(series.V),
+				}
+			}),
+		},
+	})
+}
+
+type SubscriptionsService struct {
+	*SubscriptionsRepo
+}
+
+func NewSubscriptionsService(sr *SubscriptionsRepo) *SubscriptionsService {
+	return &SubscriptionsService{
+		SubscriptionsRepo: sr,
+	}
+}
+
+func (srv *SubscriptionsService) SubscribeUserToSeries(ctx context.Context, seriesID, userID uint64) error {
+	return srv.SubscriptionsRepo.Insert(ctx, &Subscription{
+		SeriesID:  seriesID,
+		UserID:    userID,
+		CreatedAt: time.Now(),
+	})
 }

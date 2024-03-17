@@ -26,22 +26,6 @@ func NewNull[T any](v T, valid bool) Null[T] {
 	}
 }
 
-type Series struct {
-	ID         uint64       `db:"id"`
-	Name       string       `db:"name"`
-	PosterPath Null[string] `db:"poster_path"`
-	CreatedAt  time.Time    `db:"created_at"`
-}
-
-func (s *Series) ToMap() map[string]any {
-	return map[string]any{
-		"id":          s.ID,
-		"name":        s.Name,
-		"poster_path": s.PosterPath.NullOrValue(),
-		"created_at":  s.CreatedAt,
-	}
-}
-
 type Notification struct {
 	Episode          int    `db:"episode"`
 	Season           int    `db:"name"`
@@ -55,29 +39,43 @@ func (Notification) GetColumns() []string {
 	}
 }
 
-func (s *Notification) ToColumns(cols []string) []interface{} {
+func (n *Notification) ToColumns(cols []string) []interface{} {
 	values := make([]interface{}, len(cols))
 	for i, col := range cols {
 		switch col {
 		case "episode":
-			values[i] = s.Episode
+			values[i] = n.Episode
 		case "season":
-			values[i] = s.Season
+			values[i] = n.Season
 		case "series_id":
-			values[i] = s.SeriesID
+			values[i] = n.SeriesID
 		case "discord_message_id":
-			values[i] = s.DiscordMessageID
+			values[i] = n.DiscordMessageID
 		}
 	}
 
 	return values
 }
 
-func (s *Notification) ToMap() map[string]any {
+func (n *Notification) ToMap() map[string]any {
 	return map[string]any{
-		"episode":            s.Episode,
-		"season":             s.Season,
-		"series_id":          s.SeriesID,
-		"discord_message_id": s.DiscordMessageID,
+		"episode":            n.Episode,
+		"season":             n.Season,
+		"series_id":          n.SeriesID,
+		"discord_message_id": n.DiscordMessageID,
+	}
+}
+
+type Subscription struct {
+	SeriesID  uint64    `db:"series_id"`
+	UserID    uint64    `db:"user_id"`
+	CreatedAt time.Time `db:"created_at"`
+}
+
+func (s *Subscription) ToMap() map[string]any {
+	return map[string]any{
+		"series_id":  s.SeriesID,
+		"user_id":    s.UserID,
+		"created_at": s.CreatedAt,
 	}
 }

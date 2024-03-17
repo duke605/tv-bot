@@ -29,6 +29,7 @@ type Client interface {
 	TVSeriesService
 	ConfigurationService
 	TVSeasonsService
+	SearchService
 }
 
 type client struct {
@@ -38,6 +39,7 @@ type client struct {
 	TVSeriesService
 	ConfigurationService
 	TVSeasonsService
+	SearchService
 }
 
 type ClientOption = func(*client)
@@ -100,6 +102,7 @@ func NewClient(baseURL string, opts ...ClientOption) (Client, error) {
 	c.TVSeriesService = NewTVSeries(c)
 	c.ConfigurationService = NewConfigurationService(c)
 	c.TVSeasonsService = NewTVSeasonsService(c)
+	c.SearchService = NewSearchService(c)
 
 	return c, nil
 }

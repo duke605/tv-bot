@@ -1,5 +1,10 @@
 package utils
 
+type Tuple[T, V any] struct {
+	T T
+	V V
+}
+
 type Batcher[T any] interface {
 	Add(T) error
 	Flush() error

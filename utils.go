@@ -4,8 +4,6 @@ import (
 	"context"
 	"strconv"
 	"time"
-
-	"github.com/pressly/goose/v3"
 )
 
 func TryAll(fns ...func() error) error {
@@ -16,10 +14,6 @@ func TryAll(fns ...func() error) error {
 	}
 
 	return nil
-}
-
-func setGooseDialect() error {
-	return goose.SetDialect("sqlite3")
 }
 
 func PP[T any](t T) *T {
@@ -45,22 +39,6 @@ func Send[T any](ctx context.Context, ch chan<- T, t T) bool {
 	}
 }
 
-// LoadOrNoop checks the loaded map to see if the thing has already been loaded and if not loads all its dependencies.
-// Function will return any error that occurs when loading the dependencies. If the thing has already been loaded, false is
-// returned otherwise true.
-func LoadOrNoop(thing string, deps ...func() error) (bool, error) {
-	if loaded[thing] {
-		return false, nil
-	}
-
-	if err := TryAll(deps...); err != nil {
-		return false, err
-	}
-
-	loaded[thing] = true
-	return true, nil
-}
-
 func HumanDuration(d time.Duration) string {
 	str := ""
 	if h := d / time.Hour; h >= 1 {
@@ -78,12 +56,4 @@ func HumanDuration(d time.Duration) string {
 	}
 
 	return str
-}
-
-func Must[T any](t T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-
-	return t
 }

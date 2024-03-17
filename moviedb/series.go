@@ -3,8 +3,26 @@ package moviedb
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strconv"
 )
+
+type SearchSeriesDetails struct {
+	ID               uint64   `json:"id"`
+	Adult            bool     `json:"adult"`
+	BackdropPath     string   `json:"backdrop_path"`
+	GenreIDs         []uint64 `json:"genre_ids"`
+	OriginCountry    []string `json:"origin_country"`
+	OriginalLanguage string   `json:"original_language"`
+	OriginalName     string   `json:"original_name"`
+	Overview         string   `json:"overview"`
+	Popularity       float64  `json:"popularity"`
+	PosterPath       string   `json:"poster_path"`
+	FirstAirDate     string   `json:"first_air_date"`
+	Name             string   `json:"name"`
+	VoteAverage      float64  `json:"vote_average"`
+	VoteCount        int      `json:"vote_count"`
+}
 
 type SeriesDetails struct {
 	ID           uint64 `json:"id"`
@@ -118,6 +136,27 @@ func NewTVSeries(c Client) TVSeriesService {
 
 func (tvs *tvSeriesService) GetTVSeriesDetails(id uint64, dst *SeriesDetails, opts ...RequestOption) (*http.Response, error) {
 	resp, err := tvs.do(http.MethodGet, strconv.FormatUint(id, 10), opts...)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	err = json.NewDecoder(resp.Body).Decode(dst)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp, err
+}
+
+func (ss *searchService) SearchTVSeriesDetails(name string, dst *SearchResults[*SearchSeriesDetails], opts ...RequestOption) (*http.Response, error) {
+	opts = append(slices.Clip(opts), RequestOptionWithQueryParams(
+		"query", name,
+		"language", "en-US",
+		"include_adult", "false",
+	))
+
+	resp, err := ss.do(http.MethodGet, "tv", opts...)
 	if err != nil {
 		return nil, err
 	}
