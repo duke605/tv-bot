@@ -33,8 +33,9 @@ type Client interface {
 }
 
 type client struct {
-	httpClient *http.Client
-	baseURL    *url.URL
+	httpClient        *http.Client
+	baseURL           *url.URL
+	globalRequestOpts []RequestOption
 
 	TVSeriesService
 	ConfigurationService
@@ -48,6 +49,12 @@ type RequestOption = func(*http.Request) *http.Request
 func ClientOptionWithHTTPClient(c *http.Client) ClientOption {
 	return func(cl *client) {
 		cl.httpClient = c
+	}
+}
+
+func ClientOptionGlobalRequestOption(opt RequestOption) ClientOption {
+	return func(cl *client) {
+		cl.globalRequestOpts = append(cl.globalRequestOpts, opt)
 	}
 }
 
@@ -114,6 +121,9 @@ func (client *client) Do(method, path string, opts ...RequestOption) (*http.Resp
 		return nil, err
 	}
 
+	for _, opt := range client.globalRequestOpts {
+		req = opt(req)
+	}
 	for _, opt := range opts {
 		req = opt(req)
 	}

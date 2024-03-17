@@ -84,10 +84,10 @@ func NewSubscriptionsRepo(db *sqlx.DB) *SubscriptionsRepo {
 	}
 }
 
-func (repo *SubscriptionsRepo) GetDistinctSeriesIDs(ctx context.Context) utils.Pager[uint64] {
-	builder := sq.Select("DISTINCT series_id").From("subscriptions").Limit(10)
+func (repo *SubscriptionsRepo) GetDistinctSeriesIDsWithEpoch(ctx context.Context) utils.Pager[utils.Tuple[uint64, time.Time]] {
+	builder := sq.Select("series_id, MAX(created_at)").From("subscriptions").Limit(10).GroupBy("series_id")
 
-	return utils.NewPager(func(page int, buf []uint64) ([]uint64, error) {
+	return utils.NewPager(func(page int, buf []utils.Tuple[uint64, time.Time]) ([]utils.Tuple[uint64, time.Time], error) {
 		query, args, err := builder.Offset(uint64(page) * 10).ToSql()
 		if err != nil {
 			return nil, err
@@ -95,14 +95,26 @@ func (repo *SubscriptionsRepo) GetDistinctSeriesIDs(ctx context.Context) utils.P
 
 		start := time.Now()
 		defer func() {
-			slog.DebugContext(ctx, "Getting distinct series IDs", "query", query, "duration", time.Since(start).String(), "error", err)
+			slog.DebugContext(ctx, "Getting distinct series IDs with epochs", "query", query, "duration", time.Since(start).String(), "error", err)
 		}()
 		buf = buf[:0]
-		err = repo.db.SelectContext(ctx, &buf, query, args...)
+		rows, err := repo.db.QueryxContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		} else if len(buf) == 0 {
 			return nil, sql.ErrNoRows
+		}
+
+		for rows.Next() {
+			t := utils.Tuple[uint64, time.Time]{}
+			if err := rows.Scan(&t.T, &t.V); err != nil {
+				return nil, err
+			}
+
+			buf = append(buf, t)
+		}
+		if rows.Err() != nil {
+			return nil, err
 		}
 
 		return buf, err
@@ -130,6 +142,28 @@ func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, ser
 	return userIDs, nil
 }
 
+// GetAllSubscribedToSeries returns a slice of user IDs that are subscribed to the series ID provided
+func (repo *SubscriptionsRepo) GetUserSubscriptions(ctx context.Context, userID uint64) ([]*Subscription, error) {
+	query, args, err := sq.Select("*").
+		From("subscriptions").
+		Where(sq.Eq{"user_id": userID}).
+		ToSql()
+	if err != nil {
+		return nil, err
+	}
+
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Getting subscribers for series", "query", query, "duration", time.Since(start).String(), "error", err)
+	}()
+	subs := []*Subscription{}
+	if err = repo.db.SelectContext(ctx, &subs, query, args...); err != nil {
+		return nil, err
+	}
+
+	return subs, nil
+}
+
 func (repo *SubscriptionsRepo) Insert(ctx context.Context, sub *Subscription) error {
 	query, args, err := sq.Insert("subscriptions").
 		SetMap(sub.ToMap()).
@@ -140,17 +174,20 @@ func (repo *SubscriptionsRepo) Insert(ctx context.Context, sub *Subscription) er
 
 	start := time.Now()
 	defer func() {
-		slog.DebugContext(ctx, "Inserting subscription", "query", query, "duration", time.Since(start).String(), "error", err)
+		slog.DebugContext(ctx, "Inserting subscription", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
 	}()
-	_, err = repo.db.ExecContext(ctx, query, args)
+	_, err = repo.db.ExecContext(ctx, query, args...)
 	return err
 }
 
-func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, userID uint64) (bool, error) {
+func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, seriesID, userID uint64) (bool, error) {
 	query, args, err := sq.Select("true").
 		From("subscriptions").
 		Limit(1).
-		Where("user_id", userID).
+		Where(sq.Eq{
+			"user_id":   userID,
+			"series_id": seriesID,
+		}).
 		ToSql()
 	if err != nil {
 		return false, err
@@ -158,7 +195,7 @@ func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, userID uint
 
 	start := time.Now()
 	defer func() {
-		slog.DebugContext(ctx, "Checking if user is subscribed", "query", query, "user_id", userID, "duration", time.Since(start).String(), "error", err)
+		slog.DebugContext(ctx, "Checking if user is subscribed", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
 	}()
 	f := false
 	err = repo.db.GetContext(ctx, &f, query, args...)
@@ -171,31 +208,9 @@ func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, userID uint
 	return f, nil
 }
 
-func (repo *SubscriptionsRepo) GetEarliestSubscriptionForSeries(ctx context.Context, seriesID uint64) (time.Time, error) {
-	query, args, err := sq.Select("MIN(created_at)").
-		From("subscriptions").
-		Where("series_id", seriesID).
-		ToSql()
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Getting earliest subscription for series", "query", query, "series_id", seriesID, "duration", time.Since(start).String(), "error", err)
-	}()
-	t := time.Time{}
-	err = repo.db.GetContext(ctx, &t, query, args...)
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	return t, nil
-}
-
 func (repo *SubscriptionsRepo) DeleteSubscriptionsForSeries(ctx context.Context, seriesID uint64) error {
 	query, args, err := sq.Delete("subscriptions").
-		Where("series_id", seriesID).
+		Where(sq.Eq{"series_id": seriesID}).
 		ToSql()
 	if err != nil {
 		return err
@@ -203,7 +218,7 @@ func (repo *SubscriptionsRepo) DeleteSubscriptionsForSeries(ctx context.Context,
 
 	start := time.Now()
 	defer func() {
-		slog.DebugContext(ctx, "Deleting subscriptions for series", "query", query, "series_id", seriesID, "duration", time.Since(start).String(), "error", err)
+		slog.DebugContext(ctx, "Deleting subscriptions for series", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
 	}()
 	_, err = repo.db.ExecContext(ctx, query, args...)
 	if err != nil {

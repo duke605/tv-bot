@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
 	"github.com/bwmarrin/discordgo"
@@ -76,7 +77,13 @@ func init() {
 			})
 			httpClient := oauth2.NewClient(context.Background(), t)
 
-			return moviedb.NewClient(viper.GetString("moviedb.base_url"), moviedb.ClientOptionWithHTTPClient(httpClient))
+			return moviedb.NewClient(viper.GetString("moviedb.base_url"),
+				moviedb.ClientOptionWithHTTPClient(httpClient),
+				moviedb.ClientOptionGlobalRequestOption(func(r *http.Request) *http.Request {
+					slog.Debug("Hitting TheMovieDB endpoint", slog.String("url", r.URL.String()))
+					return r
+				}),
+			)
 		},
 	}, di.Def{
 		Name: SrvCtnKeyDiscord,

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -59,9 +60,15 @@ func (srv *SeriesService) SearchSeries(ctx context.Context, name string) ([]util
 		return []utils.Tuple[string, uint64]{}, nil
 	}
 
-	ret := make([]utils.Tuple[string, uint64], 0, results.TotalResults)
+	ret := make([]utils.Tuple[string, uint64], 0, len(results.Results))
 	for _, s := range results.Results {
-		ret = append(ret, utils.Tuple[string, uint64]{T: s.Name, V: s.ID})
+		date, err := time.Parse(time.DateOnly, s.FirstAirDate)
+		if err != nil {
+			continue
+		}
+
+		name := fmt.Sprintf("%s (%s)", s.Name, date.Format("2006"))
+		ret = append(ret, utils.Tuple[string, uint64]{T: name, V: s.ID})
 	}
 
 	// Adding IDs to cache
@@ -76,7 +83,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	seriesPager := srv.subsSrv.GetDistinctSeriesIDs(ctx)
+	seriesPager := srv.subsSrv.GetDistinctSeriesIDsWithEpoch(ctx)
 	now := time.Now()
 	var subscribersIDs []uint64
 	outstanding := utils.NewDualBatcher(10, func(embeds []*discordgo.MessageEmbed, notifications []*Notification) error {
@@ -84,12 +91,13 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	})
 
 	for {
-		seriesID, err := seriesPager.Next()
+		row, err := seriesPager.Next()
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		} else if err != nil {
 			return err
 		}
+		seriesID, epoch := row.T, row.V
 		logger := slog.With("series_id", seriesID)
 
 		// Getting subscribers to the series and skipping if none
@@ -100,11 +108,6 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 		if len(subscribersIDs) == 0 {
 			logger.WarnContext(ctx, "No subscribers for series")
 			continue
-		}
-
-		epoch, err := srv.subsSrv.GetEarliestSubscriptionForSeries(ctx, seriesID)
-		if err != nil {
-			return err
 		}
 
 		series := &moviedb.SeriesDetails{}
@@ -353,7 +356,7 @@ func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *Subs
 				return
 			}
 
-			// Checking if series has ended
+			// Checking if series has ended and removing all subscriptions for it if it has
 			status := strings.ToLower(series.Status)
 			if status == "canceled" || status == "ended" {
 				srv.subsSrv.DeleteSubscriptionsForSeries(ctx, seriesID)
@@ -362,7 +365,7 @@ func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *Subs
 				return
 			}
 
-			isSubbed, err := srv.subsSrv.UserIsSubscribed(ctx, userID)
+			isSubbed, err := srv.subsSrv.UserIsSubscribed(ctx, seriesID, userID)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed checking if user is subscribed", "user_id", userID, "series_id", seriesID)
 				resp.SetError(err).SetTitle("Failed checking subscription status").Edit()
@@ -378,10 +381,71 @@ func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *Subs
 				return
 			}
 
-			resp.SetSuccess("You will now receive updates when new episodes release").SetTitlef("Successfully subscribed to '%s'", series.Name).Edit()
+			imagePath := ""
+			thumbnailPath := ""
+			if series.BackdropPath != "" {
+				imagePath, _ = url.JoinPath("https://image.tmdb.org/t/p/w780", series.BackdropPath)
+			}
+			if series.PosterPath != "" {
+				thumbnailPath, _ = url.JoinPath("https://image.tmdb.org/t/p/w780", series.PosterPath)
+			}
+			resp.SetSuccess("You will now receive updates when new episodes release").
+				SetImage(imagePath).
+				SetThumbnail(thumbnailPath).
+				SetTitlef("Successfully subscribed to '%s'", series.Name).
+				Edit()
 		},
 		Autocomplete: map[string]autocompleteHandler{
 			"series": srv.autocompleteForSeriesName,
+		},
+	}).addToHandlersMap(srv.commands)
+
+	(&discordCommand{
+		ApplicationCommand: discordgo.ApplicationCommand{
+			Name:         "subscriptions",
+			Description:  "Lists all series you are subscribed to",
+			DMPermission: PP(false),
+		},
+		Handle: func(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate) {
+			s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Flags: discordgo.MessageFlagsEphemeral,
+				},
+			})
+
+			resp := utils.NewDiscordResponse(s, i)
+			userID, _ := strconv.ParseUint(i.Member.User.ID, 10, 64)
+
+			subs, err := srv.subsSrv.GetUserSubscriptions(ctx, userID)
+			if err != nil {
+				slog.ErrorContext(ctx, "Failed to get user's subscriptions", "error", err)
+				resp.SetError(err).SetTitle("Failed get your subscriptions").Edit()
+				return
+			}
+
+			// Getting series details for all subscriptions
+			series := map[string]string{}
+			for _, sub := range subs {
+				s, err := srv.seriesSrv.GetSeriesDetails(ctx, sub.SeriesID)
+				if err != nil {
+					slog.ErrorContext(ctx, "Failed to get series information for a user's subscription", "error", err, "subscription", sub.ToMap())
+					resp.SetError(err).SetTitle("Failed get details on one of your subscriptions").Edit()
+					return
+				}
+
+				date, _ := time.Parse(time.DateOnly, s.FirstAirDate)
+				series[s.Status] += fmt.Sprintf("\n- %s (%s)", s.Name, date.Format("2006"))
+			}
+
+			for status, list := range series {
+				status = strings.Trim(strings.ReplaceAll(status, "Series", ""), " ")
+				resp.AddField(status+" series", list, false)
+			}
+
+			resp.SetInfo("").
+				SetTitle("You subscriptions").
+				Edit()
 		},
 	}).addToHandlersMap(srv.commands)
 

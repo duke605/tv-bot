@@ -14,7 +14,10 @@ type DiscordResponse interface {
 	SetInfo(string) DiscordResponse
 	SetWarning(string) DiscordResponse
 	SetSuccess(string) DiscordResponse
+	SetImage(string) DiscordResponse
+	SetThumbnail(string) DiscordResponse
 	SetError(error) DiscordResponse
+	AddField(name, value string, inline bool) DiscordResponse
 	SetDescription(string) DiscordResponse
 }
 
@@ -32,6 +35,20 @@ func NewDiscordResponse(s *discordgo.Session, i *discordgo.InteractionCreate) Di
 	}
 }
 
+func (dr *discordResponse) AddField(name, value string, inline bool) DiscordResponse {
+	if dr.embed.Fields == nil {
+		dr.embed.Fields = make([]*discordgo.MessageEmbedField, 0, 1)
+	}
+
+	dr.embed.Fields = append(dr.embed.Fields, &discordgo.MessageEmbedField{
+		Name:   name,
+		Value:  value,
+		Inline: inline,
+	})
+
+	return dr
+}
+
 func (dr *discordResponse) SetDescription(d string) DiscordResponse {
 	dr.embed.Description = d
 
@@ -46,6 +63,32 @@ func (dr *discordResponse) SetDescriptionf(d string, args ...interface{}) Discor
 
 func (dr *discordResponse) SetTitle(t string) DiscordResponse {
 	dr.embed.Title = t
+
+	return dr
+}
+
+func (dr *discordResponse) SetThumbnail(image string) DiscordResponse {
+	if image == "" {
+		dr.embed.Thumbnail = nil
+		return dr
+	}
+
+	dr.embed.Thumbnail = &discordgo.MessageEmbedThumbnail{
+		URL: image,
+	}
+
+	return dr
+}
+
+func (dr *discordResponse) SetImage(image string) DiscordResponse {
+	if image == "" {
+		dr.embed.Image = nil
+		return dr
+	}
+
+	dr.embed.Image = &discordgo.MessageEmbedImage{
+		URL: image,
+	}
 
 	return dr
 }
