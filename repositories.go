@@ -46,6 +46,25 @@ func (repo *NotificationsRepo) InsertMany(ctx context.Context, notis []*Notifica
 	return err
 }
 
+func (repo *NotificationsRepo) DeleteAllNotifications(ctx context.Context) (int64, error) {
+	query, _, err := sq.Delete("notifications").ToSql()
+	if err != nil {
+		return 0, err
+	}
+
+	start := time.Now()
+	defer func() {
+		slog.DebugContext(ctx, "Deleting all notifications", "query", query, "duration", time.Since(start).String(), "error", err)
+	}()
+	r, err := repo.db.ExecContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+
+	n, _ := r.RowsAffected()
+	return n, err
+}
+
 func (repo *NotificationsRepo) ExistsForEpisodeSeasonAndSeries(ctx context.Context, episode, season int, seriesID uint64) (bool, error) {
 	query, args, err := sq.Select("series_id").
 		From("notifications").
@@ -86,6 +105,11 @@ func NewSubscriptionsRepo(db *sqlx.DB) *SubscriptionsRepo {
 
 func (repo *SubscriptionsRepo) GetDistinctSeriesIDsWithEpoch(ctx context.Context) utils.Pager[utils.Tuple[uint64, time.Time]] {
 	builder := sq.Select("series_id, MAX(created_at)").From("subscriptions").Limit(10).GroupBy("series_id")
+	timeFormats := []string{
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05Z07:00",
+	}
 
 	return utils.NewPager(func(page int, buf []utils.Tuple[uint64, time.Time]) ([]utils.Tuple[uint64, time.Time], error) {
 		query, args, err := builder.Offset(uint64(page) * 10).ToSql()
@@ -101,13 +125,22 @@ func (repo *SubscriptionsRepo) GetDistinctSeriesIDsWithEpoch(ctx context.Context
 		rows, err := repo.db.QueryxContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
-		} else if len(buf) == 0 {
-			return nil, sql.ErrNoRows
 		}
 
 		for rows.Next() {
 			t := utils.Tuple[uint64, time.Time]{}
-			if err := rows.Scan(&t.T, &t.V); err != nil {
+			ts := ""
+			if err := rows.Scan(&t.T, &ts); err != nil {
+				return nil, err
+			}
+
+			for _, f := range timeFormats {
+				t.V, err = time.Parse(f, ts)
+				if err == nil {
+					break
+				}
+			}
+			if err != nil {
 				return nil, err
 			}
 
@@ -122,9 +155,10 @@ func (repo *SubscriptionsRepo) GetDistinctSeriesIDsWithEpoch(ctx context.Context
 }
 
 // GetAllSubscribedToSeries returns a slice of user IDs that are subscribed to the series ID provided
-func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, seriesID uint64) ([]uint64, error) {
+func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, seriesID ...uint64) ([]uint64, error) {
 	query, args, err := sq.Select("user_id").
 		From("subscriptions").
+		Where(sq.Eq{"series_id": seriesID}).
 		ToSql()
 	if err != nil {
 		return nil, err
@@ -132,7 +166,7 @@ func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, ser
 
 	start := time.Now()
 	defer func() {
-		slog.DebugContext(ctx, "Getting subscribers for series", "query", query, "duration", time.Since(start).String(), "error", err)
+		slog.DebugContext(ctx, "Getting subscribers for series", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
 	}()
 	userIDs := []uint64{}
 	if err = repo.db.SelectContext(ctx, &userIDs, query, args...); err != nil {
@@ -208,7 +242,7 @@ func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, seriesID, u
 	return f, nil
 }
 
-func (repo *SubscriptionsRepo) DeleteSubscriptionsForSeries(ctx context.Context, seriesID uint64) error {
+func (repo *SubscriptionsRepo) DeleteSubscriptionsForSeries(ctx context.Context, seriesID ...uint64) error {
 	query, args, err := sq.Delete("subscriptions").
 		Where(sq.Eq{"series_id": seriesID}).
 		ToSql()

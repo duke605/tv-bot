@@ -46,6 +46,7 @@ var rootCommand = &cobra.Command{
 			slog.InfoContext(ctx, "Finding new episodes for series on watchlist")
 			if err := seriesService.FindNewEpisodes(ctx); err != nil {
 				slog.ErrorContext(ctx, "Error occurred while finding new episodes", "error", err)
+				return
 			}
 			slog.InfoContext(ctx, "Finished looking for new episodes", "duration", time.Since(start).String())
 		})
@@ -138,11 +139,58 @@ var registerDiscordCommandsCommand = &cobra.Command{
 	},
 }
 
+var findNewEpisodesCommand = &cobra.Command{
+	Use:   "episodes:find_new",
+	Short: "Finds new episodes for all subscribed series",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) (err error) {
+		cmd.SilenceUsage = true
+		defer utils.ReturnPanic(&err)
+		ctx, cancel := context.WithCancel(cmd.Context())
+		defer cancel()
+
+		seriesSrv := srvCtn.Get(SrvCtnKeySeriesSrv).(*SeriesService)
+
+		start := time.Now()
+		if err := seriesSrv.FindNewEpisodes(ctx); err != nil {
+			return err
+		}
+
+		fmt.Println("Finished looking for new episodes. Took", time.Since(start).String())
+		return nil
+	},
+}
+
+var deleteEpisodeNotificationsCommand = &cobra.Command{
+	Use:   "episodes:delete_notifications",
+	Short: "Deletes notifications for episode releases from the database so notifications can be sent again",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) (err error) {
+		cmd.SilenceUsage = true
+		defer utils.ReturnPanic(&err)
+		ctx, cancel := context.WithCancel(cmd.Context())
+		defer cancel()
+
+		notiRepo := srvCtn.Get(SrvCtnKeyNotificationsRepo).(*NotificationsRepo)
+
+		start := time.Now()
+		n, err := notiRepo.DeleteAllNotifications(ctx)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Finised deleting %d notification(s). Took %s\n", n, time.Since(start).String())
+		return nil
+	},
+}
+
 func init() {
 	rootCommand.AddCommand(
 		migrateCommand,
 		makeMigrationCommand,
 		rollbackMigrationCommand,
 		registerDiscordCommandsCommand,
+		findNewEpisodesCommand,
+		deleteEpisodeNotificationsCommand,
 	)
 }

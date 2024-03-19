@@ -16,6 +16,7 @@ import (
 	"github.com/sarulabs/di"
 	"github.com/spf13/afero"
 	"github.com/spf13/viper"
+	"go.uber.org/ratelimit"
 	"golang.org/x/oauth2"
 )
 
@@ -76,11 +77,16 @@ func init() {
 				TokenType:   "bearer",
 			})
 			httpClient := oauth2.NewClient(context.Background(), t)
+			rl := ratelimit.New(2)
 
 			return moviedb.NewClient(viper.GetString("moviedb.base_url"),
 				moviedb.ClientOptionWithHTTPClient(httpClient),
 				moviedb.ClientOptionGlobalRequestOption(func(r *http.Request) *http.Request {
 					slog.Debug("Hitting TheMovieDB endpoint", slog.String("url", r.URL.String()))
+					return r
+				}),
+				moviedb.ClientOptionGlobalRequestOption(func(r *http.Request) *http.Request {
+					rl.Take()
 					return r
 				}),
 			)

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -89,16 +87,18 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	outstanding := utils.NewDualBatcher(10, func(embeds []*discordgo.MessageEmbed, notifications []*Notification) error {
 		return srv.sendEmbedsAndMakeNotifications(ctx, notifications, embeds, subscribersIDs)
 	})
+	finishedSeries := []*moviedb.SeriesDetails{}
 
 	for {
-		row, err := seriesPager.Next()
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		} else if err != nil {
+		row, more, err := seriesPager.Next()
+		if err != nil {
 			return err
+		} else if !more {
+			break
 		}
 		seriesID, epoch := row.T, row.V
 		logger := slog.With("series_id", seriesID)
+		logger.DebugContext(ctx, "Looking for new episodes for series")
 
 		// Getting subscribers to the series and skipping if none
 		subscribersIDs, err = srv.subsSrv.GetAllSubscribedToSeries(ctx, seriesID)
@@ -119,6 +119,12 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			return err
 		}
 		srv.seriesCacheByID.Add(series.ID, series)
+
+		// Adding the series to the finished slice to inform subscribers that a series
+		// they subscribe to has ended or been cancelled
+		if series.Status == "Ended" || series.Status == "Canceled" || series.Status == "Cancelled" {
+			finishedSeries = append(finishedSeries, series)
+		}
 
 		season := moviedb.SeasonDetails{}
 		_, err = srv.movieDBClient.GetTVSeasonDetails(series.ID, series.NumberOfSeasons, &season,
@@ -168,6 +174,8 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			return err
 		}
 	}
+
+	return srv.sendFinishedSeriesNotificationsAndUnsubscribeSubscribers(ctx, finishedSeries)
 }
 
 // GetSeriesDetails gets details about a series. Function will attempt to look for the details in the cache
@@ -189,6 +197,73 @@ func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64)
 	srv.seriesCacheByID.Add(seriesID, series)
 
 	return series, nil
+}
+
+func (srv *SeriesService) sendFinishedSeriesNotificationsAndUnsubscribeSubscribers(
+	ctx context.Context,
+	series []*moviedb.SeriesDetails,
+) error {
+	if len(series) == 0 {
+		return nil
+	}
+
+	seriesIDs := make([]uint64, 0, len(series))
+	cancelled := ""
+	ended := ""
+
+	for _, s := range series {
+		seriesIDs = append(seriesIDs, s.ID)
+		if s.Status == "Ended" {
+			ended += "\n- " + s.Name
+		} else {
+			cancelled += "\n- " + s.Name
+		}
+	}
+	cancelled = strings.Trim(cancelled, "\n")
+	ended = strings.Trim(ended, "\n")
+
+	fields := make([]*discordgo.MessageEmbedField, 0, 2)
+	if cancelled != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Cancelled",
+			Inline: true,
+			Value:  strings.Trim(cancelled, "\n"),
+		})
+	}
+	if ended != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Ended",
+			Inline: true,
+			Value:  strings.Trim(ended, "\n"),
+		})
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "Series cancelled or ended",
+		Description: "Unfortunately the following series have either ended or been cancelled :pensive:",
+		Fields:      fields,
+	}
+
+	subscriberIDs, err := srv.subsSrv.GetAllSubscribedToSeries(ctx, seriesIDs...)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed getting all subscribers for series", "series", seriesIDs)
+		return err
+	}
+
+	channelID := viper.GetString("discord.notifications_channel_id")
+	srv.discord.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Embed: embed,
+		Content: utils.Reduce(subscriberIDs, func(a string, e uint64) string {
+			return a + "\n" + fmt.Sprintf("<@%d>", e)
+		}, ""),
+	})
+
+	if err = srv.subsSrv.DeleteSubscriptionsForSeries(ctx, seriesIDs...); err != nil {
+		slog.ErrorContext(ctx, "Failed unsubscribing subscribers from series", "series", seriesIDs)
+		return err
+	}
+
+	return nil
 }
 
 func (SeriesService) makeEmbedForEpisode(
@@ -215,11 +290,16 @@ func (SeriesService) makeEmbedForEpisode(
 				Inline: true,
 			},
 			{
-				Name:   "Wathers",
+				Name:   "Watchers",
 				Inline: true,
 				Value: strings.Join(utils.MapSlice(subscriberIDs, func(sID uint64, _ int) string {
 					return fmt.Sprintf("<@%d>", sID)
 				}), " "),
+			},
+			{
+				Name:   "Episode type",
+				Inline: true,
+				Value:  episode.EpisodeType,
 			},
 		},
 		Author: &discordgo.MessageEmbedAuthor{
@@ -247,8 +327,13 @@ func (SeriesService) makeEmbedForEpisode(
 	}
 
 	if len(series.Networks) > 0 {
+		networks := ""
+		for _, n := range series.Networks {
+			networks += " | " + n.Name
+		}
+
 		embed.Footer = &discordgo.MessageEmbedFooter{
-			Text: series.Networks[0].Name,
+			Text: strings.Trim(networks, "| "),
 		}
 
 		if series.Networks[0].LogoPath != "" {

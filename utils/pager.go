@@ -1,12 +1,7 @@
 package utils
 
-import (
-	"database/sql"
-	"errors"
-)
-
 type Pager[T any] interface {
-	Next() (T, error)
+	Next() (T, bool, error)
 }
 
 type pager[T any] struct {
@@ -24,18 +19,18 @@ func NewPager[T any](nextFn func(currPage int, buf []T) ([]T, error)) Pager[T] {
 	}
 }
 
-func (p *pager[T]) Next() (T, error) {
+func (p *pager[T]) Next() (T, bool, error) {
 	if p.done {
-		return *new(T), sql.ErrNoRows
+		return *new(T), false, nil
 	}
 
 	if p.currIdx+1 > len(p.buf)-1 {
 		b, err := p.nextPageFn(p.currPage, p.buf)
-		if errors.Is(err, sql.ErrNoRows) {
+		if err != nil {
+			return *new(T), false, err
+		} else if len(b) == 0 {
 			p.done = true
-			return *new(T), err
-		} else if err != nil {
-			return *new(T), err
+			return *new(T), false, err
 		}
 
 		p.buf = b
@@ -46,5 +41,5 @@ func (p *pager[T]) Next() (T, error) {
 	t := p.buf[p.currIdx]
 	p.currIdx++
 
-	return t, nil
+	return t, true, nil
 }

@@ -18,6 +18,14 @@ func Map[K comparable, V, R any](m map[K]V, mapper func(V, K) R) []R {
 	return ret
 }
 
+func Reduce[E, R any](slice []E, fn func(a R, e E) R, initial R) R {
+	for _, e := range slice {
+		initial = fn(initial, e)
+	}
+
+	return initial
+}
+
 func Clamp[T any](t []T, limit int) []T {
 	if len(t) < limit {
 		return t
