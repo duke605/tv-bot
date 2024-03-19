@@ -147,6 +147,11 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 				continue
 			}
 
+			// Not showing notification if it's missing a description, runtime, or still path unless the time is past 8:00PM
+			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Now().Hour() < 20 {
+				continue
+			}
+
 			// Checking if we've already notified discord about this episode
 			exists, err := srv.notiRepo.ExistsForEpisodeSeasonAndSeries(ctx, episode.EpisodeNumber, season.SeasonNumber, series.ID)
 			if err != nil {
