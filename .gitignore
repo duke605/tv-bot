@@ -4,3 +4,5 @@
 node_modules/
 database.db*
 *.jsonl
+tv-bot*
+build.bat
