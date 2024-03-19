@@ -149,6 +149,15 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 
 			// Not showing notification if it's missing a description, runtime, or still path unless the time is past 8:00PM
 			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Now().Hour() < 20 {
+				slog.DebugContext(ctx, "Found new episode but has missing information. Delaying notification...",
+					slog.String("series", series.Name),
+					slog.Uint64("series_id", series.ID),
+					slog.Int("episode", episode.EpisodeNumber),
+					slog.Int("season", episode.SeasonNumber),
+					slog.Bool("missing_overview", episode.Overview == ""),
+					slog.Bool("missing_runtime", episode.Runtime == 0),
+					slog.Bool("missing_still_path", episode.StillPath == ""),
+				)
 				continue
 			}
 
@@ -321,9 +330,14 @@ func (SeriesService) makeEmbedForEpisode(
 		}
 	}
 
-	if episode.StillPath != "" {
+	if episode.StillPath != "" || series.BackdropPath != "" {
+		path := episode.StillPath
+		if path == "" {
+			path = series.BackdropPath
+		}
+
 		embed.Image = &discordgo.MessageEmbedImage{
-			URL: fmt.Sprintf("https://image.tmdb.org/t/p/w780/%s", episode.StillPath),
+			URL: fmt.Sprintf("https://image.tmdb.org/t/p/w780/%s", path),
 		}
 	}
 

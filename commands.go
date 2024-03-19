@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"github.com/pressly/goose/v3"
 	"github.com/robfig/cron"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var rootCommand = &cobra.Command{
@@ -30,6 +32,7 @@ var rootCommand = &cobra.Command{
 		discordCommandService := srvCtn.Get(SrvCtnKeyDiscordCommandSrv).(*DiscordCommandService)
 		discord := srvCtn.Get(SrvCtnKeyDiscord).(*discordgo.Session)
 		seriesService := srvCtn.Get(SrvCtnKeySeriesSrv).(*SeriesService)
+		viper := srvCtn.Get(SrvCtnKeyViper).(*viper.Viper)
 
 		ctx, cancel := context.WithCancel(cmd.Context())
 		defer cancel()
@@ -56,6 +59,18 @@ var rootCommand = &cobra.Command{
 
 		sigs := make(chan os.Signal, 1)
 		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		http.HandleFunc("GET /shutdown", func(w http.ResponseWriter, r *http.Request) {
+			slog.InfoContext(ctx, "Received shutdown command from HTTP server")
+			fmt.Fprintln(w, "Shutting down...")
+			signal.Stop(sigs)
+			sigs <- syscall.SIGTERM
+		})
+
+		server := http.Server{Addr: viper.GetString("addr")}
+		go server.ListenAndServe()
+		httpCtx, _ := context.WithTimeout(context.Background(), time.Second*5)
+		defer server.Shutdown(httpCtx)
+
 		<-sigs
 		fmt.Println("Exiting!")
 
