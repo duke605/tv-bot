@@ -6,8 +6,7 @@ CREATE TABLE `notifications` (
   `series_id` BIGINT UNSIGNED NOT NULL,
   `discord_message_id` BIGINT UNSIGNED NOT NULL,
 
-  PRIMARY KEY (`episode`, `season`, `series_id`),
-  FOREIGN KEY (`series_id`) REFERENCES `series`(`id`)
+  PRIMARY KEY (`episode`, `season`, `series_id`)
 );
 -- +goose StatementEnd
 

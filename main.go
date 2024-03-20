@@ -33,6 +33,7 @@ const (
 	SrvCtnKeySeriesSrv         string = "seriesService"
 	SrvCtnKeySubsSrv           string = "subsService"
 	SrvCtnKeyDiscordCommandSrv string = "discordCommandService"
+	SrvCtnKeySeriesRepo        string = "seriesRepo"
 )
 
 func init() {
@@ -132,8 +133,9 @@ func init() {
 			subSrv := ctn.Get(SrvCtnKeySubsSrv).(*SubscriptionsService)
 			discord := ctn.Get(SrvCtnKeyDiscord).(*discordgo.Session)
 			moviedbClient := ctn.Get(SrvCtnKeyMovieDBClient).(moviedb.Client)
+			seriesRepo := ctn.Get(SrvCtnKeySeriesRepo).(*SeriesRepo)
 
-			return NewSeriesService(notificationsRepo, subSrv, discord, moviedbClient), nil
+			return NewSeriesService(notificationsRepo, subSrv, discord, moviedbClient, seriesRepo), nil
 		},
 	}, di.Def{
 		Name: SrvCtnKeySubsSrv,
@@ -151,6 +153,13 @@ func init() {
 			subsService := ctn.Get(SrvCtnKeySubsSrv).(*SubscriptionsService)
 
 			return NewDiscordCommandService(discord, seriesSrv, subsService), nil
+		},
+	}, di.Def{
+		Name: SrvCtnKeySeriesRepo,
+		Build: func(ctn di.Container) (interface{}, error) {
+			db := ctn.Get(SrvCtnKeyDatabase).(*sqlx.DB)
+
+			return NewSeriesRepo(db), nil
 		},
 	}); err != nil {
 		panic(err)

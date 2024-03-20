@@ -194,7 +194,7 @@ var deleteEpisodeNotificationsCommand = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("Finised deleting %d notification(s). Took %s\n", n, time.Since(start).String())
+		fmt.Printf("Finished deleting %d notification(s). Took %s\n", n, time.Since(start).String())
 		return nil
 	},
 }

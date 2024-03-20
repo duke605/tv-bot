@@ -2,7 +2,12 @@ package main
 
 import (
 	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
 	"time"
+
+	"github.com/duke605/tv-bot/moviedb"
 )
 
 type Null[T any] struct {
@@ -24,6 +29,32 @@ func NewNull[T any](v T, valid bool) Null[T] {
 			Valid: valid,
 		},
 	}
+}
+
+type JSON[T any] struct {
+	V T
+}
+
+func (j *JSON[T]) Scan(src interface{}) error {
+	if src == nil {
+		j.V = *new(T)
+	}
+
+	var b []byte
+	switch src := src.(type) {
+	case string:
+		b = []byte(src)
+	case []byte:
+		b = src
+	default:
+		return fmt.Errorf("models: '%T' not supported", src)
+	}
+
+	return json.Unmarshal(b, &j.V)
+}
+
+func (j JSON[T]) Value() (driver.Value, error) {
+	return json.Marshal(j.V)
 }
 
 type Notification struct {
@@ -77,5 +108,21 @@ func (s *Subscription) ToMap() map[string]any {
 		"series_id":  s.SeriesID,
 		"user_id":    s.UserID,
 		"created_at": s.CreatedAt,
+	}
+}
+
+type Series struct {
+	ID                 uint64                       `db:"id"`
+	NextEpisodeAirDate Null[time.Time]              `db:"next_episode_air_date"`
+	Data               JSON[*moviedb.SeriesDetails] `db:"data"`
+	LastFetchedAt      time.Time                    `db:"last_fetched_at"`
+}
+
+func (s *Series) ToMap() map[string]any {
+	return map[string]any{
+		"id":                    s.ID,
+		"next_episode_air_date": s.NextEpisodeAirDate,
+		"data":                  s.Data,
+		"last_fetched_at":       s.LastFetchedAt,
 	}
 }

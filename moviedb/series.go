@@ -61,7 +61,7 @@ type SeriesDetails struct {
 		StillPath      string  `json:"still_path"`
 	} `json:"last_episode_to_air"`
 	Name             string `json:"name"`
-	NextEpisodeToAir struct {
+	NextEpisodeToAir *struct {
 		ID             uint64  `json:"id"`
 		Name           string  `json:"name"`
 		Overview       string  `json:"overview"`

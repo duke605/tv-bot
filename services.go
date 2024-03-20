@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -19,22 +21,41 @@ import (
 type SeriesService struct {
 	notiRepo      *NotificationsRepo
 	subsSrv       *SubscriptionsService
+	seriesRepo    *SeriesRepo
 	discord       *discordgo.Session
 	movieDBClient moviedb.Client
 
-	seriesCacheByID *expirable.LRU[uint64, *moviedb.SeriesDetails]
-	searchCache     *expirable.LRU[string, []utils.Tuple[string, uint64]]
+	searchCache *expirable.LRU[string, []utils.Tuple[string, uint64]]
 }
 
-func NewSeriesService(nr *NotificationsRepo, ss *SubscriptionsService, d *discordgo.Session, mdbc moviedb.Client) *SeriesService {
+func NewSeriesService(nr *NotificationsRepo, ss *SubscriptionsService, d *discordgo.Session, mdbc moviedb.Client, sr *SeriesRepo) *SeriesService {
 	return &SeriesService{
-		notiRepo:        nr,
-		subsSrv:         ss,
-		discord:         d,
-		movieDBClient:   mdbc,
-		seriesCacheByID: expirable.NewLRU[uint64, *moviedb.SeriesDetails](100, nil, time.Minute*10),
-		searchCache:     expirable.NewLRU[string, []utils.Tuple[string, uint64]](100, nil, time.Minute*10),
+		notiRepo:      nr,
+		subsSrv:       ss,
+		discord:       d,
+		seriesRepo:    sr,
+		movieDBClient: mdbc,
+		searchCache:   expirable.NewLRU[string, []utils.Tuple[string, uint64]](100, nil, time.Minute*10),
 	}
+}
+
+// CacheSeries saves the series information to the database
+func (srv *SeriesService) CacheSeries(ctx context.Context, s *moviedb.SeriesDetails) error {
+	seriesModel := &Series{}
+	seriesModel.ID = s.ID
+	seriesModel.LastFetchedAt = time.Now()
+	seriesModel.Data.V = s
+	if s.NextEpisodeToAir != nil {
+		t, err := time.ParseInLocation(time.DateOnly, s.NextEpisodeToAir.AirDate, time.Local)
+		if err != nil {
+			return err
+		}
+
+		seriesModel.NextEpisodeAirDate.V = t
+		seriesModel.NextEpisodeAirDate.Valid = true
+	}
+
+	return srv.seriesRepo.Upsert(ctx, seriesModel)
 }
 
 // SearchSeries searches for series that partially or fully match the provided name and returns an array of tuples containing
@@ -118,7 +139,10 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		srv.seriesCacheByID.Add(series.ID, series)
+
+		if err = srv.CacheSeries(ctx, series); err != nil {
+			logger.ErrorContext(ctx, "Failed to cache series", "error", err)
+		}
 
 		// Adding the series to the finished slice to inform subscribers that a series
 		// they subscribe to has ended or been cancelled
@@ -195,20 +219,25 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 // GetSeriesDetails gets details about a series. Function will attempt to look for the details in the cache
 // before going out to the internet.
 func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64) (*moviedb.SeriesDetails, error) {
-	series, ok := srv.seriesCacheByID.Get(seriesID)
-	if ok {
-		return series, nil
+	seriesModel, err := srv.seriesRepo.GetSeriesByID(ctx, seriesID)
+	if err == nil {
+		return seriesModel.Data.V, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		slog.ErrorContext(ctx, "Failed to get series from database", "error", err)
 	}
 
-	series = new(moviedb.SeriesDetails)
-	_, err := srv.movieDBClient.GetTVSeriesDetails(seriesID, series,
+	series := new(moviedb.SeriesDetails)
+	_, err = srv.movieDBClient.GetTVSeriesDetails(seriesID, series,
 		moviedb.RequestOptionWithContext(ctx),
 		moviedb.RequestOptionWithQueryParams("language", "en-US"),
 	)
 	if err != nil {
 		return nil, err
 	}
-	srv.seriesCacheByID.Add(seriesID, series)
+
+	if err = srv.CacheSeries(ctx, series); err != nil {
+		slog.ErrorContext(ctx, "Failed to cache series", "series", series, "error", err)
+	}
 
 	return series, nil
 }

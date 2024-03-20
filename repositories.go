@@ -39,9 +39,7 @@ func (repo *NotificationsRepo) InsertMany(ctx context.Context, notis []*Notifica
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Inserting many notifications", "query", query, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Inserting many notifications", start, "query", query)
 	_, err = repo.db.ExecContext(ctx, query, args...)
 	return err
 }
@@ -53,9 +51,7 @@ func (repo *NotificationsRepo) DeleteAllNotifications(ctx context.Context) (int6
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Deleting all notifications", "query", query, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Deleting all notifications", start, "query", query)
 	r, err := repo.db.ExecContext(ctx, query)
 	if err != nil {
 		return 0, err
@@ -80,9 +76,7 @@ func (repo *NotificationsRepo) ExistsForEpisodeSeasonAndSeries(ctx context.Conte
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Checking for existence of notification", "query", query, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Checking for existence of notification", start, "query", query)
 	err = repo.db.GetContext(ctx, &seriesID, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -118,9 +112,8 @@ func (repo *SubscriptionsRepo) GetDistinctSeriesIDsWithEpoch(ctx context.Context
 		}
 
 		start := time.Now()
-		defer func() {
-			slog.DebugContext(ctx, "Getting distinct series IDs with epochs", "query", query, "duration", time.Since(start).String(), "error", err)
-		}()
+		defer logQuery(ctx, "Getting distinct series IDs with epochs", start, "query", query)
+
 		buf = buf[:0]
 		rows, err := repo.db.QueryxContext(ctx, query, args...)
 		if err != nil {
@@ -165,9 +158,7 @@ func (repo *SubscriptionsRepo) GetAllSubscribedToSeries(ctx context.Context, ser
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Getting subscribers for series", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Getting subscribers for series", start, "query", query, "args", args)
 	userIDs := []uint64{}
 	if err = repo.db.SelectContext(ctx, &userIDs, query, args...); err != nil {
 		return nil, err
@@ -187,9 +178,7 @@ func (repo *SubscriptionsRepo) GetUserSubscriptions(ctx context.Context, userID 
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Getting subscribers for series", "query", query, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Getting subscribers for series", start, "query", query)
 	subs := []*Subscription{}
 	if err = repo.db.SelectContext(ctx, &subs, query, args...); err != nil {
 		return nil, err
@@ -207,9 +196,7 @@ func (repo *SubscriptionsRepo) Insert(ctx context.Context, sub *Subscription) er
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Inserting subscription", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Inserting subscription", start, "query", query, "args", args)
 	_, err = repo.db.ExecContext(ctx, query, args...)
 	return err
 }
@@ -228,9 +215,7 @@ func (repo *SubscriptionsRepo) UserIsSubscribed(ctx context.Context, seriesID, u
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Checking if user is subscribed", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Checking if user is subscribed", start, "query", query, "args", args)
 	f := false
 	err = repo.db.GetContext(ctx, &f, query, args...)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -251,13 +236,64 @@ func (repo *SubscriptionsRepo) DeleteSubscriptionsForSeries(ctx context.Context,
 	}
 
 	start := time.Now()
-	defer func() {
-		slog.DebugContext(ctx, "Deleting subscriptions for series", "query", query, "args", args, "duration", time.Since(start).String(), "error", err)
-	}()
+	defer logQuery(ctx, "Deleting subscriptions for series", start, "query", query, "args", args)
 	_, err = repo.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
+
+type SeriesRepo struct {
+	db *sqlx.DB
+}
+
+func NewSeriesRepo(db *sqlx.DB) *SeriesRepo {
+	return &SeriesRepo{db}
+}
+
+func (repo *SeriesRepo) GetSeriesByID(ctx context.Context, seriesID uint64) (*Series, error) {
+	query, args, err := sq.Select("*").
+		From("series").
+		Where(sq.Eq{"id": seriesID}).
+		Limit(1).
+		ToSql()
+	if err != nil {
+		return nil, err
+	}
+
+	series := new(Series)
+	start := time.Now()
+	defer logQuery(ctx, "Getting series by ID", start, "query", query, "args", args)
+	err = repo.db.GetContext(ctx, series, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	return series, nil
+}
+
+func (repo *SeriesRepo) Upsert(ctx context.Context, s *Series) error {
+	query, args, err := sq.Insert("series").
+		SetMap(s.ToMap()).
+		Suffix(`ON CONFLICT (id) DO UPDATE SET
+			next_episode_air_date=excluded.next_episode_air_date,
+			data=excluded.data,
+			last_fetched_at=excluded.last_fetched_at
+		`).
+		ToSql()
+	if err != nil {
+		return err
+	}
+
+	start := time.Now()
+	defer logQuery(ctx, "Upserting series", start, "query", query, "args", args)
+	_, err = repo.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+func logQuery(ctx context.Context, msg string, start time.Time, args ...interface{}) {
+	args = append(args, "duration", time.Since(start))
+	slog.DebugContext(ctx, msg, args...)
 }
