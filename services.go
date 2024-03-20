@@ -257,9 +257,16 @@ func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64)
 func (*SeriesService) canSkipCheckForNewEpisodes(seriesModel *Series) bool {
 	day := time.Hour * 24
 	nextReleaseDate := seriesModel.NextEpisodeAirDate.V
-	return seriesModel.NextEpisodeAirDate.Valid &&
-		time.Until(nextReleaseDate) > time.Hour &&
-		time.Since(seriesModel.LastFetchedAt) < day*2
+
+	// Allowing skip if there is no next episode date set yet and it has been less than
+	// a week since the last fetch. The next episode date not being set *usually* only
+	// happens when the next season is still in the works, at which point the next episode
+	// day is set much before the next episode actually airs
+	if !seriesModel.NextEpisodeAirDate.Valid && time.Since(seriesModel.LastFetchedAt) < day*7 {
+		return true
+	}
+
+	return seriesModel.NextEpisodeAirDate.Valid && time.Until(nextReleaseDate) > time.Hour
 }
 
 func (srv *SeriesService) sendFinishedSeriesNotificationsAndUnsubscribeSubscribers(
