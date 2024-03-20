@@ -131,17 +131,28 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			continue
 		}
 
-		series := &moviedb.SeriesDetails{}
-		_, err = srv.movieDBClient.GetTVSeriesDetails(seriesID, series,
-			moviedb.RequestOptionWithQueryParams("language", "en-US"),
-			moviedb.RequestOptionWithContext(ctx),
-		)
+		series, seriesModel, err := srv.GetSeriesDetails(ctx, seriesID)
 		if err != nil {
-			return err
-		}
+			logger.ErrorContext(ctx, "Failed to get series", "cached", seriesModel != nil, "error", err)
+		} else if seriesModel != nil {
+			if srv.canSkipCheckForNewEpisodes(seriesModel) {
+				logger.DebugContext(ctx, "Skipping series look up", "series_name", series.Name)
+				continue
+			}
 
-		if err = srv.CacheSeries(ctx, series); err != nil {
-			logger.ErrorContext(ctx, "Failed to cache series", "error", err)
+			// Getting series from TMDB instead of using cache
+			series = &moviedb.SeriesDetails{}
+			_, err = srv.movieDBClient.GetTVSeriesDetails(seriesID, series,
+				moviedb.RequestOptionWithQueryParams("language", "en-US"),
+				moviedb.RequestOptionWithContext(ctx),
+			)
+			if err != nil {
+				return err
+			}
+
+			if err = srv.CacheSeries(ctx, series); err != nil {
+				logger.ErrorContext(ctx, "Failed to cache series", "error", err)
+			}
 		}
 
 		// Adding the series to the finished slice to inform subscribers that a series
@@ -217,11 +228,12 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 }
 
 // GetSeriesDetails gets details about a series. Function will attempt to look for the details in the cache
-// before going out to the internet.
-func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64) (*moviedb.SeriesDetails, error) {
+// before going out to the internet. If the series was pulled from cache the series model will also be returned
+// otherwise it will be nil
+func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64) (*moviedb.SeriesDetails, *Series, error) {
 	seriesModel, err := srv.seriesRepo.GetSeriesByID(ctx, seriesID)
 	if err == nil {
-		return seriesModel.Data.V, nil
+		return seriesModel.Data.V, seriesModel, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		slog.ErrorContext(ctx, "Failed to get series from database", "error", err)
 	}
@@ -232,14 +244,22 @@ func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64)
 		moviedb.RequestOptionWithQueryParams("language", "en-US"),
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if err = srv.CacheSeries(ctx, series); err != nil {
 		slog.ErrorContext(ctx, "Failed to cache series", "series", series, "error", err)
 	}
 
-	return series, nil
+	return series, nil, nil
+}
+
+func (*SeriesService) canSkipCheckForNewEpisodes(seriesModel *Series) bool {
+	day := time.Hour * 24
+	nextReleaseDate := seriesModel.NextEpisodeAirDate.V
+	return seriesModel.NextEpisodeAirDate.Valid &&
+		time.Until(nextReleaseDate) > time.Hour &&
+		time.Since(seriesModel.LastFetchedAt) < day*2
 }
 
 func (srv *SeriesService) sendFinishedSeriesNotificationsAndUnsubscribeSubscribers(
@@ -482,7 +502,7 @@ func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *Subs
 				return
 			}
 
-			series, err := srv.seriesSrv.GetSeriesDetails(ctx, seriesID)
+			series, _, err := srv.seriesSrv.GetSeriesDetails(ctx, seriesID)
 			if err != nil {
 				slog.ErrorContext(ctx, "Failed to get series information", "error", err)
 				resp.SetError(err).SetTitle("Failed to look up information about series").Edit()
@@ -560,7 +580,7 @@ func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *Subs
 			// Getting series details for all subscriptions
 			series := map[string]string{}
 			for _, sub := range subs {
-				s, err := srv.seriesSrv.GetSeriesDetails(ctx, sub.SeriesID)
+				s, _, err := srv.seriesSrv.GetSeriesDetails(ctx, sub.SeriesID)
 				if err != nil {
 					slog.ErrorContext(ctx, "Failed to get series information for a user's subscription", "error", err, "subscription", sub.ToMap())
 					resp.SetError(err).SetTitle("Failed get details on one of your subscriptions").Edit()
@@ -572,8 +592,7 @@ func NewDiscordCommandService(s *discordgo.Session, ss *SeriesService, sus *Subs
 			}
 
 			for status, list := range series {
-				status = strings.Trim(strings.ReplaceAll(status, "Series", ""), " ")
-				resp.AddField(status+" series", list, false)
+				resp.AddField(status, list, false)
 			}
 
 			resp.SetInfo("").
