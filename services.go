@@ -102,10 +102,6 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	params := []moviedb.RequestOption{
-		moviedb.RequestOptionWithQueryParams("language", "en-US"),
-		moviedb.RequestOptionWithContext(ctx),
-	}
 	seriesPager := srv.subsSrv.GetDistinctSeriesIDsWithEpoch(ctx)
 	now := time.Now()
 	var subscribersIDs []uint64
@@ -139,7 +135,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 		if err != nil {
 			logger.ErrorContext(ctx, "Failed to get series", "cached", seriesModel != nil, "error", err)
 		} else if seriesModel != nil {
-			if srv.canSkipCheckForNewEpisodes(seriesModel) {
+			if srv.canSkipCheckForNewEpisodes(ctx, seriesModel, epoch) {
 				logger.DebugContext(ctx, "Skipping series look up", "series_name", series.Name)
 				continue
 			}
@@ -166,7 +162,10 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 		}
 
 		season := moviedb.SeasonDetails{}
-		_, err = srv.movieDBClient.GetTVSeasonDetails(series.ID, series.NumberOfSeasons, &season, params...)
+		_, err = srv.movieDBClient.GetTVSeasonDetails(series.ID, series.NumberOfSeasons, &season,
+			moviedb.RequestOptionWithQueryParams("language", "en-US"),
+			moviedb.RequestOptionWithContext(ctx),
+		)
 		if err != nil {
 			return err
 		}
@@ -174,14 +173,26 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 
 		// Making a list of episodes that we haven't notified discord about
 		for _, episode := range season.Episodes {
-			logger = logger.With("episode_number", episode.EpisodeNumber)
-
 			// Checking if the episode has aired yet or the episode aired before we started listening
 			if episode.AirDate == "" {
 				continue
 			}
-			releaseDate, err := time.ParseInLocation(time.DateOnly, episode.AirDate, now.Location())
+			releaseDate, err := time.Parse(time.DateOnly, episode.AirDate)
 			if err != nil || releaseDate.After(now) || releaseDate.Before(epoch) {
+				continue
+			}
+
+			// Not showing notification if it's missing a description, runtime, or still path unless the time is past 8:00PM
+			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Since(releaseDate) > time.Hour*26 {
+				slog.DebugContext(ctx, "Found new episode but has missing information. Delaying notification...",
+					slog.String("series", series.Name),
+					slog.Uint64("series_id", series.ID),
+					slog.Int("episode", episode.EpisodeNumber),
+					slog.Int("season", episode.SeasonNumber),
+					slog.Bool("missing_overview", episode.Overview == ""),
+					slog.Bool("missing_runtime", episode.Runtime == 0),
+					slog.Bool("missing_still_path", episode.StillPath == ""),
+				)
 				continue
 			}
 
@@ -190,27 +201,6 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			if err != nil {
 				return err
 			} else if exists {
-				continue
-			}
-
-			// Only getting the details if some details are missing. Sometimes the episode data from the episode endpoint is more
-			// up to date than the episode data from the season endpoint
-			if srv.episodeHasMissingInformation(&episode) {
-				logger.InfoContext(ctx, "Getting more up to date data for episode")
-				_, err = srv.movieDBClient.GetTVEpisodeDetails(seriesID, season.SeasonNumber, episode.EpisodeNumber, &episode, params...)
-				if err != nil {
-					return err
-				}
-			}
-
-			// Not showing notification if it's missing a description, runtime, or still path unless the time is past 8:00PM
-			if srv.episodeHasMissingInformation(&episode) && time.Now().Hour() < 20 {
-				logger.DebugContext(ctx, "Found new episode but has missing information. Delaying notification...",
-					slog.String("series", series.Name),
-					slog.Bool("missing_overview", episode.Overview == ""),
-					slog.Bool("missing_runtime", episode.Runtime == 0),
-					slog.Bool("missing_still_path", episode.StillPath == ""),
-				)
 				continue
 			}
 
@@ -235,10 +225,6 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 	}
 
 	return srv.sendFinishedSeriesNotificationsAndUnsubscribeSubscribers(ctx, finishedSeries)
-}
-
-func (*SeriesService) episodeHasMissingInformation(e *moviedb.EpisodeDetails) bool {
-	return e.Overview == "" || e.StillPath == "" || e.Runtime == 0
 }
 
 // GetSeriesDetails gets details about a series. Function will attempt to look for the details in the cache
@@ -268,9 +254,23 @@ func (srv *SeriesService) GetSeriesDetails(ctx context.Context, seriesID uint64)
 	return series, nil, nil
 }
 
-func (*SeriesService) canSkipCheckForNewEpisodes(seriesModel *Series) bool {
+func (srv *SeriesService) canSkipCheckForNewEpisodes(ctx context.Context, seriesModel *Series, epoch time.Time) bool {
 	day := time.Hour * 24
 	nextReleaseDate := seriesModel.NextEpisodeAirDate.V
+	lastEpisode := seriesModel.Data.V.LastEpisodeToAir
+
+	// Checking to see if we've made a notification for the last released episode yet (If we should've)
+	if lastEpisode != nil {
+		t, _ := time.Parse(time.DateOnly, lastEpisode.AirDate)
+		if !t.Before(epoch) {
+			en := lastEpisode.EpisodeNumber
+			sn := lastEpisode.SeasonNumber
+			f, err := srv.notiRepo.ExistsForEpisodeSeasonAndSeries(ctx, en, sn, seriesModel.ID)
+			if err == nil && !f {
+				return false
+			}
+		}
+	}
 
 	// Allowing skip if there is no next episode date set yet and it has been less than
 	// a week since the last fetch. The next episode date not being set *usually* only

@@ -24,6 +24,22 @@ type SearchSeriesDetails struct {
 	VoteCount        int      `json:"vote_count"`
 }
 
+type PartialEpisodeDetails struct {
+	ID             uint64  `json:"id"`
+	Name           string  `json:"name"`
+	Overview       string  `json:"overview"`
+	VoteAverage    float64 `json:"vote_average"`
+	VoteCount      int     `json:"vote_count"`
+	AirDate        string  `json:"air_date"`
+	EpisodeNumber  int     `json:"episode_number"`
+	EpisodeType    string  `json:"episode_type"`
+	ProductionCode string  `json:"production_code"`
+	Runtime        int     `json:"runtime"`
+	SeasonNumber   int     `json:"season_number"`
+	ShowID         int     `json:"show_id"`
+	StillPath      string  `json:"still_path"`
+}
+
 type SeriesDetails struct {
 	ID           uint64 `json:"id"`
 	Adult        bool   `json:"adult"`
@@ -41,42 +57,14 @@ type SeriesDetails struct {
 		ID   uint64 `json:"id"`
 		Name string `json:"name"`
 	} `json:"genres"`
-	Homepage         string   `json:"homepage"`
-	InProduction     bool     `json:"in_production"`
-	Languages        []string `json:"languages"`
-	LastAirDate      string   `json:"last_air_date"`
-	LastEpisodeToAir struct {
-		ID             uint64  `json:"id"`
-		Name           string  `json:"name"`
-		Overview       string  `json:"overview"`
-		VoteAverage    float64 `json:"vote_average"`
-		VoteCount      int     `json:"vote_count"`
-		AirDate        string  `json:"air_date"`
-		EpisodeNumber  int     `json:"episode_number"`
-		EpisodeType    string  `json:"episode_type"`
-		ProductionCode string  `json:"production_code"`
-		Runtime        int     `json:"runtime"`
-		SeasonNumber   int     `json:"season_number"`
-		ShowID         int     `json:"show_id"`
-		StillPath      string  `json:"still_path"`
-	} `json:"last_episode_to_air"`
-	Name             string `json:"name"`
-	NextEpisodeToAir *struct {
-		ID             uint64  `json:"id"`
-		Name           string  `json:"name"`
-		Overview       string  `json:"overview"`
-		VoteAverage    float64 `json:"vote_average"`
-		VoteCount      int     `json:"vote_count"`
-		AirDate        string  `json:"air_date"`
-		EpisodeNumber  int     `json:"episode_number"`
-		EpisodeType    string  `json:"episode_type"`
-		ProductionCode string  `json:"production_code"`
-		Runtime        int     `json:"runtime"`
-		SeasonNumber   int     `json:"season_number"`
-		ShowID         int     `json:"show_id"`
-		StillPath      string  `json:"still_path"`
-	} `json:"next_episode_to_air"`
-	Networks []struct {
+	Homepage         string                 `json:"homepage"`
+	InProduction     bool                   `json:"in_production"`
+	Languages        []string               `json:"languages"`
+	LastAirDate      string                 `json:"last_air_date"`
+	LastEpisodeToAir *PartialEpisodeDetails `json:"last_episode_to_air"`
+	NextEpisodeToAir *PartialEpisodeDetails `json:"next_episode_to_air"`
+	Name             string                 `json:"name"`
+	Networks         []struct {
 		ID            uint64 `json:"id"`
 		LogoPath      string `json:"logo_path"`
 		Name          string `json:"name"`
