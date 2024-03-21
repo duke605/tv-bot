@@ -177,13 +177,13 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			if episode.AirDate == "" {
 				continue
 			}
-			releaseDate, err := time.Parse(time.DateOnly, episode.AirDate)
+			releaseDate, err := time.ParseInLocation(time.DateOnly, episode.AirDate, time.Local)
 			if err != nil || releaseDate.After(now) || releaseDate.Before(epoch) {
 				continue
 			}
 
 			// Not showing notification if it's missing a description, runtime, or still path unless the time is past 8:00PM
-			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Since(releaseDate) < time.Hour*26 {
+			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Since(releaseDate) < time.Hour*48 {
 				slog.DebugContext(ctx, "Found new episode but has missing information. Delaying notification...",
 					slog.String("series", series.Name),
 					slog.Uint64("series_id", series.ID),
@@ -192,9 +192,12 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 					slog.Bool("missing_overview", episode.Overview == ""),
 					slog.Bool("missing_runtime", episode.Runtime == 0),
 					slog.Bool("missing_still_path", episode.StillPath == ""),
+					slog.Duration("since_air_date", time.Since(releaseDate)),
 				)
 				continue
 			}
+			fmt.Println(time.Since(releaseDate))
+			fmt.Println(releaseDate)
 
 			// Checking if we've already notified discord about this episode
 			exists, err := srv.notiRepo.ExistsForEpisodeSeasonAndSeries(ctx, episode.EpisodeNumber, season.SeasonNumber, series.ID)
