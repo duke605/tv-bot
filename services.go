@@ -192,7 +192,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 					slog.Bool("missing_overview", episode.Overview == ""),
 					slog.Bool("missing_runtime", episode.Runtime == 0),
 					slog.Bool("missing_still_path", episode.StillPath == ""),
-					slog.Duration("since_air_date", time.Since(releaseDate)),
+					slog.String("since_air_date", time.Since(releaseDate).String()),
 				)
 				continue
 			}

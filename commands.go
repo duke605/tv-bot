@@ -44,7 +44,7 @@ var rootCommand = &cobra.Command{
 		defer discord.Close()
 
 		c := cron.New()
-		c.AddFunc("0 30 * * * *", func() {
+		c.AddFunc("0,30 * * * *", func() {
 			start := time.Now()
 			slog.InfoContext(ctx, "Finding new episodes for series on watchlist")
 			if err := seriesService.FindNewEpisodes(ctx); err != nil {
