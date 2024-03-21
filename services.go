@@ -183,7 +183,7 @@ func (srv *SeriesService) FindNewEpisodes(ctx context.Context) error {
 			}
 
 			// Not showing notification if it's missing a description, runtime, or still path unless the time is past 8:00PM
-			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Since(releaseDate) > time.Hour*26 {
+			if (episode.Overview == "" || episode.StillPath == "" || episode.Runtime == 0) && time.Since(releaseDate) < time.Hour*26 {
 				slog.DebugContext(ctx, "Found new episode but has missing information. Delaying notification...",
 					slog.String("series", series.Name),
 					slog.Uint64("series_id", series.ID),
