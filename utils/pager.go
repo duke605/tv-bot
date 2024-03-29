@@ -24,7 +24,7 @@ func (p *pager[T]) Next() (T, bool, error) {
 		return *new(T), false, nil
 	}
 
-	if p.currIdx+1 > len(p.buf)-1 {
+	if p.currIdx > len(p.buf)-1 {
 		b, err := p.nextPageFn(p.currPage, p.buf)
 		if err != nil {
 			return *new(T), false, err
